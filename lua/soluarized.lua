@@ -1,12 +1,12 @@
 --[[ NOTHING INSIDE THIS FILE NEEDS TO BE EDITED BY THE USER. ]]
 
 --- @class Highlite.Definition
---- @field bg string|table the background color
---- @field blend number the transparency value
---- @field dark Highlite.Definition special highlight definition for when `&bg` is 'dark'
---- @field fg string|table the foreground color
---- @field light Highlite.Definition special highlight definition for when `&bg` is 'light'
---- @field style Highlite.Style special appearance alterations
+--- @field bg? string|table the background color
+--- @field blend? number the transparency value
+--- @field dark? Highlite.Definition special highlight definition for when `&bg` is 'dark'
+--- @field fg? string|table the foreground color
+--- @field light? Highlite.Definition special highlight definition for when `&bg` is 'light'
+--- @field style? Highlite.Style special appearance alterations
 
 --- @class Highlite.Style
 --- @field color string|table color of underline or undercurl
@@ -23,27 +23,24 @@ local _PALETTE_CTERM = _USE_256 and 2 or 3
 local _PALETTE_HEX  = 1
 
 --- The `string` type.
-local _TYPE_STRING = 'string'
+local _TYPE_STRING = type ''
 
 --- The `table` type.
-local _TYPE_TABLE  = 'table'
+local _TYPE_TABLE  = type {}
 
 --[[/* Helper Functions */]]
 
---- @param color string|table the color name or definition
+--- @param color? string|table the color name or definition
 --- @param index number
---- @return number|string color_value a hex, 16-bit, or ANSI color. "NONE" by default
+--- @return nil|number|string color_value a hex, 16-bit, or ANSI color. "NONE" by default
 local function get(color, index) -- {{{ †
-	if type(color) == _TYPE_TABLE and color[index] then
+	if color and color[index] then
 		return color[index]
 	elseif type(color) == _TYPE_STRING then
+		--- @diagnostic disable-next-line:return-type-mismatch (we test for `color == string`, which is a subtype of `(number|string)?`
 		return color
 	end
 end --}}} ‡
-
---- @param rgb string some string of RGB colors.
---- @return string hex
-local function tohex(rgb) return string.format('#%06x', rgb) end
 
 --- Create a metatable which prioritizes entries in the `&bg` index of `definition`
 --- @param definition Highlite.Definition the definition of the highlight group
@@ -58,31 +55,44 @@ end
 --- @class Highlite
 local highlite = {}
 
---- @param name string the name of the highlight group
---- @return Highlite.Definition definition an nvim-highlite compliant table describing the highlight group `name`
-function highlite.group(name)
-	local no_errors, definition = pcall(vim.api.nvim_get_hl_by_name, name, vim.go.termguicolors)
+highlite.group = vim.api.nvim_get_hl and
+	--- @param name string the name of the highlight group
+	--- @param link boolean if `true`, return highlight links instead of the true definition
+	--- @return Highlite.Definition # an nvim-highlite compliant table describing the highlight group `name`
+	function(name, link)
+		link = link or false
 
-	if not no_errors then definition = {} end
+		local definition = vim.api.nvim_get_hl(0, {link = link, name = name})
 
-	-- the style of the highlight group
-	local style = {}
-	for k, v in pairs(definition) do
-		if k == 'special' then
-			style.color = tohex(v)
-		elseif k ~= 'background' and k ~= 'blend' and k ~= 'foreground' then
-			style[#style+1] = k
+		if not link then
+			for gui, cterm in pairs {bg = 'ctermbg', fg = 'ctermfg', sp = vim.NIL} do
+				definition[gui] = {[_PALETTE_CTERM] = definition[cterm], [_PALETTE_HEX] = definition[gui]}
+				definition[cterm] = nil
+			end
 		end
-	end
 
-	return
-	{
-		fg = definition.foreground and tohex(definition.foreground),
-		bg = definition.background and tohex(definition.background),
-		blend = definition.blend,
-		style = style,
-	}
-end
+		return definition
+	end or
+	--- @param name string the name of the highlight group
+	--- @return Highlite.Definition definition an nvim-highlite compliant table describing the highlight group `name`
+	function(name)
+		local ok, definition = pcall(vim.api.nvim_get_hl_by_name, name, true)
+		local _, cterm = pcall(vim.api.nvim_get_hl_by_name, name, false)
+
+		if not ok then
+			return {}
+		end
+
+		for input, output in pairs {background = 'bg', foreground = 'fg', special = 'sp'} do
+			local definition_input = definition[input]
+			if definition_input then
+				definition[output] = {[_PALETTE_CTERM] = cterm[input], [_PALETTE_HEX] = definition_input}
+				definition[input] = nil
+			end
+		end
+
+		return definition
+	end
 
 -- Generate a `:highlight` command from a group and some definition.
 
@@ -96,6 +106,7 @@ function highlite.highlight(group_name, definition) -- {{{ †
 	else
 		-- Take care of special instructions for certain background colors.
 		if definition[vim.go.background] then
+			--- @diagnostic disable-next-line: param-type-mismatch (`str.dark` and `str.light` are `nil`)
 			definition = use_background_with(definition)
 		end
 
@@ -109,7 +120,9 @@ function highlite.highlight(group_name, definition) -- {{{ †
 
 		local style = definition.style
 		if type(style) == _TYPE_TABLE then
+			--- @diagnostic disable-next-line:param-type-mismatch (we check `type(style) == 'table'` right above this)
 			for _, option in ipairs(style) do highlight[option] = true end
+			--- @diagnostic disable-next-line:need-check-nil (we check `type(style) == 'table'` right above this)
 			highlight.special = get(style.color, _PALETTE_HEX)
 		elseif style then
 			highlight[style] = true
@@ -137,30 +150,33 @@ return setmetatable(highlite, {__call = function(self, normal, highlights, termi
 	--- @param resolve_links boolean whether to translate highlight links into full values
 	--- @returns the value at `tbl[key]`, when highlight links and embedded functions have been accounted for.
 	local function resolve(tbl, key, resolve_links)
-		local value = tbl[key]
-		local value_type = type(value)
+		local original_value = tbl[key]
+		local original_value_type = type(original_value)
 
-		if value_type == 'function' then -- call and cache the result; next time, if it isn't a function this step will be skipped
-			tbl[key] = value(setmetatable({},
-			{
-				__index = function(_, inner_key) return resolve(tbl, inner_key, true) end
-			}))
-		elseif resolve_links and value_type == _TYPE_STRING and not string.find(value, '^#') then
-			return resolve(tbl, value, resolve_links)
+		if original_value_type == 'function' then -- call and cache the result; next time, if it isn't a function this step will be skipped
+			local resolved = original_value(setmetatable({}, {__index = function(_, inner_key)
+				return resolve(tbl, inner_key, true)
+			end}))
+
+			tbl[key] = resolved
+			return resolved
+		elseif resolve_links and original_value_type == _TYPE_STRING then
+			return resolve(tbl, original_value, resolve_links)
+		else
+			return original_value
 		end
-
-		return tbl[key]
 	end
 
-	-- save the colors_name before syntax reset
-	local color_name = vim.g.colors_name
+	do
+		-- save the colors_name before syntax reset
+		local color_name = vim.g.colors_name
 
-	-- If the syntax has been enabled, reset it.
-	if vim.fn.exists 'syntax_on' then vim.api.nvim_command 'syntax reset' end
+		-- If the syntax has been enabled, reset it.
+		if vim.fn.exists 'syntax_on' then vim.api.nvim_command 'syntax reset' end
 
-	-- replace the colors_name
-	vim.g.colors_name = color_name
-	color_name = nil
+		-- replace the colors_name
+		vim.g.colors_name = color_name
+	end
 
 	-- If we aren't using hex nor 256 colorsets.
 	if not (vim.go.termguicolors or _USE_256) then vim.go.t_Co = '16' end
