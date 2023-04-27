@@ -1,3 +1,5 @@
+This colorscheme is now built-in to [`nvim-higlhite`](https://github.com/Iron-E/nvim-highlite)! Use that instead.
+
 # Introduction
 
 `nvim-soluarized` is a colorscheme based on [`vim-solarized8`](https://github.com/lifepillar/vim-solarized8) and written with [`nvim-highlite`](https://github.com/Iron-E/nvim-highlite). It supports both light _and_ dark backgrounds. See __usage__ for more.
